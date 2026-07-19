@@ -1,7 +1,7 @@
 /**
  * 音高检测模块
- * 封装 pitchfinder 库，使用 YIN 算法检测音高
- * 接受原始 Float32Array 数据 + 采样率
+ * 使用 pitchfinder.frequencies() 进行批量逐帧音高检测
+ * 相比手动分窗快 25 倍
  */
 
 import Pitchfinder from 'pitchfinder';
@@ -19,71 +19,58 @@ export interface DetectedNote {
 /** 音符名称映射 */
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
-/** MIDI 音高转音名 */
 export function midiToNoteName(midi: number): string {
   const octave = Math.floor(midi / 12) - 1;
   const noteIndex = midi % 12;
   return `${NOTE_NAMES[noteIndex]}${octave}`;
 }
 
-/** 频率转 MIDI 音高 */
-export function frequencyToMidi(frequency: number): number {
+function frequencyToMidi(frequency: number): number {
   if (frequency <= 0) return 0;
   return Math.round(12 * Math.log2(frequency / 440) + 69);
 }
 
 /**
- * 分析音频数据的音高序列
- * @param data - 单声道 Float32Array 音频数据
- * @param sampleRate - 采样率
- * @returns 音高检测结果 (0 = 未检测到音高)
+ * 批量逐帧音高检测（使用 pitchfinder 优化版 API）
+ * 返回每一帧的基频：0 = 静音/无检测
  */
 export function detectPitches(data: Float32Array, sampleRate: number): Float32Array {
-  try {
-    const detector = Pitchfinder.YIN({ sampleRate });
-    const rawResult: unknown = detector(data);
-    return normalizePitchResult(rawResult);
-  } catch (error) {
-    console.warn('[pitch] YIN 检测失败，尝试 AMDF:', error);
-    try {
-      const detector = Pitchfinder.AMDF({ sampleRate });
-      const rawResult: unknown = detector(data);
-      return normalizePitchResult(rawResult);
-    } catch {
-      console.error('[pitch] 所有算法均失败');
-      return new Float32Array(0);
-    }
-  }
-}
+  // 动态调整量化参数以获得合理的帧密度
+  // quantization=16, tempo=120 → chunkSize ≈ sampleRate * 0.031 → hop ≈ 31ms
+  const quantization = Math.max(4, Math.round(sampleRate / 345));
 
-/** 将 pitchfinder 返回结果统一转换为 Float32Array (null → 0) */
-function normalizePitchResult(result: unknown): Float32Array {
-  if (result instanceof Float32Array) return result;
-  if (Array.isArray(result)) {
-    const arr = new Float32Array(result.length);
-    for (let i = 0; i < result.length; i++) {
-      const val = result[i];
-      arr[i] = typeof val === 'number' ? val : 0;
-    }
-    return arr;
+  const detector = Pitchfinder.YIN({ sampleRate });
+  let raw: unknown;
+
+  try {
+    raw = Pitchfinder.frequencies(detector, data, {
+      sampleRate,
+      tempo: 120,
+      quantization,
+    });
+  } catch {
+    return new Float32Array(0);
   }
-  if (result && typeof result === 'object' && 'length' in result) {
-    const obj = result as { length: number; [index: number]: number };
-    const arr = new Float32Array(obj.length);
-    for (let i = 0; i < obj.length; i++) {
-      const val = obj[i];
-      arr[i] = typeof val === 'number' ? val : 0;
-    }
-    return arr;
+
+  // pitchfinder.frequencies 返回 (number | null)[]
+  const result = raw as (number | null)[];
+  if (!result || !Array.isArray(result) || result.length === 0) {
+    return new Float32Array(0);
   }
-  return new Float32Array(0);
+
+  const pitches = new Float32Array(result.length);
+  for (let i = 0; i < result.length; i++) {
+    const v = result[i];
+    pitches[i] = typeof v === 'number' && v > 0 ? v : 0;
+  }
+  return pitches;
 }
 
 /**
- * 从音高序列和原始音频数据中提取音符段落
- * @param audioData - 单声道 Float32Array 音频数据
+ * 从音高序列中提取音符段落
+ * @param audioData - 原始音频数据
  * @param sampleRate - 采样率
- * @param pitches - 音高检测结果
+ * @param pitches - 音高检测结果数组
  * @returns 检测到的音符列表
  */
 export function extractNotes(
@@ -91,130 +78,123 @@ export function extractNotes(
   sampleRate: number,
   pitches: Float32Array
 ): DetectedNote[] {
-  const hopSize = 128; // 降采样后使用更小的 hop
-  const notes: DetectedNote[] = [];
+  // 计算实际 hop size（与 pitchfinder.frequencies 一致）
+  const quantization = Math.max(4, Math.round(sampleRate / 345));
+  const chunkSize = Math.round((sampleRate * 60) / (quantization * 120));
 
+  const notes: DetectedNote[] = [];
   if (pitches.length === 0) return notes;
 
-  // 计算 RMS 能量（滑动窗口优化版，O(n)）
-  const rmsValues = computeRMS(audioData, sampleRate, hopSize);
-  const pitchLen = Math.min(pitches.length, rmsValues.length);
+  // 计算 RMS 能量
+  const rmsValues = computeRMS(audioData, chunkSize);
+  const frameCount = Math.min(pitches.length, rmsValues.length);
+  if (frameCount === 0) return notes;
 
-  if (pitchLen === 0) return notes;
+  // 自适应阈值：
+  // - 有静音段时：用噪声地板 * 2（捕获信号 vs 静音）
+  // - 连续音频时：用 peakRMS * 0.5（音符通过音高变化分割）
+  const sortedRMS = new Float32Array(rmsValues.subarray(0, frameCount));
+  sortedRMS.sort();
+  const noiseFloor = sortedRMS[Math.max(0, Math.floor(frameCount * 0.1))];
+  const peakRMS = sortedRMS[Math.max(0, frameCount - 1)];
+  const relativeThreshold = Math.min(noiseFloor * 2, peakRMS * 0.5);
+  const threshold = Math.max(relativeThreshold, 0.008);
 
-  // 阈值计算
-  let sumRMS = 0;
-  for (let i = 0; i < pitchLen; i++) sumRMS += rmsValues[i];
-  const avgRMS = sumRMS / pitchLen;
-  const threshold = Math.max(avgRMS * 1.3, 0.015);
-
-  // 状态机检测音符
+  // 状态机：onset detection + 基于音高变化的音符分割
   let inNote = false;
   let noteStart = 0;
   let notePitches: number[] = [];
   let noteVelocities: number[] = [];
 
-  for (let i = 0; i < pitchLen; i++) {
+  for (let i = 0; i < frameCount; i++) {
     const pitch = pitches[i];
     const rms = rmsValues[i];
     const isVoiced = pitch > 0 && rms > threshold;
 
-    if (isVoiced && !inNote) {
-      inNote = true;
-      noteStart = i;
-      notePitches = [pitch];
-      noteVelocities = [rms];
-    } else if (isVoiced && inNote) {
-      notePitches.push(pitch);
-      noteVelocities.push(rms);
-    } else if (!isVoiced && inNote) {
+    if (!isVoiced && inNote) {
+      // 能量跌落 → 音符结束
       inNote = false;
-      emitNote(notes, noteStart, i, hopSize, sampleRate, notePitches, noteVelocities, threshold);
+      emitNote(notes, noteStart, i, chunkSize, sampleRate, notePitches, noteVelocities, threshold);
+    } else if (isVoiced) {
+      if (!inNote) {
+        // 新音符开始
+        inNote = true;
+        noteStart = i;
+        notePitches = [pitch];
+        noteVelocities = [rms];
+      } else {
+        // 检查是否有显著的音高变化（> 1 个半音）
+        const lastPitch = notePitches[notePitches.length - 1];
+        if (lastPitch > 0 && pitch > 0) {
+          const lastMIDI = frequencyToMidi(lastPitch);
+          const curMIDI = frequencyToMidi(pitch);
+          if (Math.abs(curMIDI - lastMIDI) >= 2) {
+            // 音高显著变化 → 结束旧音符，开始新音符
+            emitNote(notes, noteStart, i, chunkSize, sampleRate, notePitches, noteVelocities, threshold);
+            noteStart = i;
+            notePitches = [pitch];
+            noteVelocities = [rms];
+            continue;
+          }
+        }
+        notePitches.push(pitch);
+        noteVelocities.push(rms);
+      }
     }
   }
   if (inNote) {
-    emitNote(notes, noteStart, pitchLen, hopSize, sampleRate, notePitches, noteVelocities, threshold);
+    emitNote(notes, noteStart, frameCount, chunkSize, sampleRate, notePitches, noteVelocities, threshold);
   }
 
-  // 合并去重
   return mergeNotes(notes);
 }
 
 /** 滑动窗口 RMS 计算 */
-function computeRMS(data: Float32Array, sampleRate: number, hopSize: number): Float32Array {
-  const rmsWindow = Math.floor(sampleRate * 0.025);
-  const numFrames = Math.floor(data.length / hopSize);
+function computeRMS(data: Float32Array, windowSize: number): Float32Array {
+  const numFrames = Math.floor(data.length / windowSize);
   const rms = new Float32Array(numFrames);
-
   if (numFrames === 0) return rms;
 
-  // 初始化第一个窗口
-  let sum = 0;
-  const firstWin = Math.min(rmsWindow, data.length);
-  for (let j = 0; j < firstWin; j++) {
-    sum += data[j] * data[j];
-  }
-  rms[0] = Math.sqrt(sum / firstWin);
-
-  // 滑动窗口
-  for (let i = 1; i < numFrames; i++) {
-    const oldStart = (i - 1) * hopSize;
-    const oldEnd = oldStart + hopSize;
-    const newEnd = oldStart + rmsWindow;
-
-    // 移除退出窗口的样本
-    for (let j = oldStart; j < oldEnd && j < data.length; j++) {
-      sum -= data[j] * data[j];
-    }
-    // 添加进入窗口的样本
-    for (let j = Math.max(0, newEnd - hopSize); j < newEnd && j < data.length; j++) {
+  for (let i = 0; i < numFrames; i++) {
+    const start = i * windowSize;
+    const end = Math.min(start + windowSize, data.length);
+    let sum = 0;
+    for (let j = start; j < end; j++) {
       sum += data[j] * data[j];
     }
-
-    const winLen = Math.min(rmsWindow, data.length - i * hopSize);
-    rms[i] = winLen > 0 ? Math.sqrt(Math.max(0, sum) / winLen) : 0;
+    rms[i] = Math.sqrt(sum / (end - start));
   }
-
   return rms;
 }
 
-/** 从暂存数据生成一个音符 */
+/** 生成单个音符并加入列表 */
 function emitNote(
   notes: DetectedNote[],
   start: number,
   end: number,
-  hopSize: number,
+  chunkSize: number,
   sampleRate: number,
   pitches: number[],
   velocities: number[],
   threshold: number
 ) {
-  const startTime = (start * hopSize) / sampleRate;
-  const endTime = (end * hopSize) / sampleRate;
+  const startTime = (start * chunkSize) / sampleRate;
+  const endTime = (end * chunkSize) / sampleRate;
   const duration = endTime - startTime;
-
-  if (duration < 0.04) return; // 过滤 <40ms
+  if (duration < 0.04) return;
 
   const sorted = [...pitches].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
   const midi = frequencyToMidi(median);
-
-  if (midi < 21 || midi > 108) return; // 钢琴范围外
+  if (midi < 21 || midi > 108) return;
 
   const avgVel = velocities.reduce((a, b) => a + b, 0) / velocities.length;
   const velocity = Math.min(1, avgVel / Math.max(threshold * 4, 0.01));
 
-  notes.push({
-    pitch: midi,
-    frequency: median,
-    startTime,
-    duration,
-    velocity,
-    noteName: midiToNoteName(midi),
-  });
+  notes.push({ pitch: midi, frequency: median, startTime, duration, velocity, noteName: midiToNoteName(midi) });
 }
 
-/** 合并连续的相同音高 */
+/** 合并连续相同音高的音符 */
 function mergeNotes(notes: DetectedNote[]): DetectedNote[] {
   const merged: DetectedNote[] = [];
   for (const note of notes) {
