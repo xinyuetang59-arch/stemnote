@@ -9,6 +9,7 @@ import Loading from './components/ui/Loading';
 import ErrorBoundary from './components/ui/ErrorBoundary';
 import { useUserStore } from './stores/userStore';
 import { useUIStore } from './stores/uiStore';
+import { usePostStore } from './stores/postStore';
 import { isOnboarded } from './lib/storage';
 import OnboardingModal from './components/ui/OnboardingModal';
 
@@ -28,6 +29,7 @@ function PageLoading() {
 export default function App() {
   const initUser = useUserStore((s) => s.init);
   const initTheme = useUIStore((s) => s.initTheme);
+  const initPosts = usePostStore((s) => s.initPosts);
   const setOnboardingOpen = useUIStore((s) => s.setOnboardingOpen);
 
   // 应用初始化
@@ -35,15 +37,24 @@ export default function App() {
     initUser();
     initTheme();
 
+    // 启动 GUN P2P 同步（让帖子跨设备可见）
+    const cleanupPosts = initPosts();
+
     // 检查是否需要显示引导
     if (!isOnboarded()) {
-      // 延迟显示引导，等页面渲染完成
       const timer = setTimeout(() => {
         setOnboardingOpen(true);
       }, 500);
-      return () => clearTimeout(timer);
+      return () => {
+        clearTimeout(timer);
+        cleanupPosts();
+      };
     }
-  }, [initUser, initTheme, setOnboardingOpen]);
+
+    return () => {
+      cleanupPosts();
+    };
+  }, [initUser, initTheme, initPosts, setOnboardingOpen]);
 
   return (
     <ErrorBoundary>
