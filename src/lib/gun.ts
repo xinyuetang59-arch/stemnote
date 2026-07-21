@@ -14,8 +14,9 @@ import type { Post, PostType, Comment } from './db';
 // GUN 实例（单例）
 const gun = new Gun({
   peers: [
-    'https://gun-manhattan.herokuapp.com/gun',  // 公共中继节点
-    'https://gun-eu.herokuapp.com/gun',
+    'https://gun-us.herokuapp.com/gun',
+    'https://peer.wall.org/gun',
+    'https://gundb.herokuapp.com/gun'
   ],
   localStorage: true, // 启用本地持久化
   radisk: true,       // 启用 Radisk 存储引擎
