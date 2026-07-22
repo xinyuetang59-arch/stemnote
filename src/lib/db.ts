@@ -194,6 +194,17 @@ export async function getCommentsByPostId(postId: number): Promise<Comment[]> {
   return comments.sort((a, b) => a.createdAt - b.createdAt);
 }
 
+/** 获取所有帖子的评论计数 */
+export async function getAllCommentCounts(): Promise<Record<number, number>> {
+  const db = await getDB();
+  const allComments = await db.getAll('comments');
+  const counts: Record<number, number> = {};
+  for (const c of allComments) {
+    counts[c.postId] = (counts[c.postId] || 0) + 1;
+  }
+  return counts;
+}
+
 /** 创建评论 */
 export async function createComment(comment: Omit<Comment, 'id'>): Promise<number> {
   const db = await getDB();

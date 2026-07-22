@@ -13,6 +13,7 @@ import {
   updatePost as updatePostInDB,
   deletePost as deletePostInDB,
   getCommentsByPostId,
+  getAllCommentCounts,
   createComment as createCommentInDB,
   deleteComment as deleteCommentInDB,
   upsertPosts,
@@ -42,6 +43,7 @@ interface PostState {
   posts: Post[];
   currentPost: Post | null;
   comments: Comment[];
+  commentCounts: Record<number, number>;
   filters: PostFilters;
   loading: boolean;
   loaded: boolean;
@@ -91,6 +93,7 @@ export const usePostStore = create<PostState>((set, get) => ({
   posts: [],
   currentPost: null,
   comments: [],
+  commentCounts: {},
   filters: { school: '', type: '' },
   loading: false,
   loaded: false,
@@ -114,13 +117,15 @@ export const usePostStore = create<PostState>((set, get) => ({
         // 写入 IndexedDB 缓存
         await upsertPosts(supabasePosts);
 
-        // 从 IndexedDB 加载完整列表
+        // 从 IndexedDB 加载完整列表 + 评论计数
         const merged = await getAllPosts();
-        set({ posts: merged, loaded: true });
+        const commentCounts = await getAllCommentCounts();
+        set({ posts: merged, commentCounts, loaded: true });
       } catch (error) {
         console.error('同步帖子失败，降级到本地数据:', error);
         const localPosts = await getAllPosts();
-        set({ posts: localPosts, loaded: true });
+        const localCounts = await getAllCommentCounts();
+        set({ posts: localPosts, commentCounts: localCounts, loaded: true });
       }
     });
 
@@ -153,9 +158,10 @@ export const usePostStore = create<PostState>((set, get) => ({
         await upsertPosts(supabasePosts);
       }
 
-      // 从 IndexedDB 加载完整列表
+      // 从 IndexedDB 加载完整列表 + 评论计数
       const merged = await getAllPosts();
-      set({ posts: merged, loading: false, loaded: true });
+      const commentCounts = await getAllCommentCounts();
+      set({ posts: merged, commentCounts, loading: false, loaded: true });
     } catch (error) {
       console.error('加载帖子失败，降级到本地数据:', error);
       const localPosts = await getAllPosts();
@@ -194,7 +200,10 @@ export const usePostStore = create<PostState>((set, get) => ({
 
         // 从 IndexedDB 加载完整评论
         const localComments = await getCommentsByPostId(postId);
-        set({ comments: localComments });
+        set((state) => ({
+          comments: localComments,
+          commentCounts: { ...state.commentCounts, [postId]: localComments.length },
+        }));
       });
     } catch (error) {
       console.error('加载评论失败，降级到本地数据:', error);

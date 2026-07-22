@@ -12,7 +12,7 @@ import Loading, { PostSkeleton } from '../components/ui/Loading';
 import EmptyState from '../components/ui/EmptyState';
 
 export default function HomePage() {
-  const { posts, loading, loaded, loadPosts, getFilteredPosts } = usePostStore();
+  const { posts, commentCounts, loading, loaded, loadPosts, getFilteredPosts } = usePostStore();
 
   useEffect(() => {
     if (!loaded) {
@@ -73,7 +73,7 @@ export default function HomePage() {
       ) : (
         <div className="space-y-4">
           {filtered.map((post) => (
-            <PostCard key={post.id} post={post} />
+            <PostCard key={post.id} post={post} commentCount={commentCounts[post.id!] || 0} />
           ))}
         </div>
       )}
