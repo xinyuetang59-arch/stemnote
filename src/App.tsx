@@ -37,7 +37,7 @@ export default function App() {
     initUser();
     initTheme();
 
-    // 启动 GUN P2P 同步（让帖子跨设备可见）
+    // 启动 Supabase 实时同步（让帖子跨用户可见）
     const cleanupPosts = initPosts();
 
     // 检查是否需要显示引导

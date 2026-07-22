@@ -129,11 +129,35 @@ export async function getPostsByAuthor(authorId: string): Promise<Post[]> {
   return posts.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-/** 创建帖子 */
-export async function createPost(post: Omit<Post, 'id'>): Promise<number> {
+/** 创建帖子（使用显式 ID，通常来自 Supabase） */
+export async function createPost(post: Post & { id: number }): Promise<number> {
   const db = await getDB();
-  const id = await db.add('posts', post);
-  return id as number;
+  await db.put('posts', post);
+  return post.id;
+}
+
+/** 批量同步帖子到 IndexedDB（仅插入不存在的，更新已有的） */
+export async function upsertPosts(posts: Post[]): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction('posts', 'readwrite');
+  for (const post of posts) {
+    if (post.id != null) {
+      await tx.store.put(post);
+    }
+  }
+  await tx.done;
+}
+
+/** 批量同步评论到 IndexedDB */
+export async function upsertComments(comments: Comment[]): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction('comments', 'readwrite');
+  for (const comment of comments) {
+    if (comment.id != null) {
+      await tx.store.put(comment);
+    }
+  }
+  await tx.done;
 }
 
 /** 更新帖子 */

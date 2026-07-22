@@ -10,8 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.0",
     "@tonejs/midi": "^2.0.28",
-    "gun": "^0.2020.1241",
     "html2canvas": "^1.4.1",
     "idb": "^8.0.0",
     "jspdf": "^2.5.2",

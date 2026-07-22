@@ -1,32 +1,36 @@
 /**
  * 帖子状态管理 (Zustand)
- * 混合存储：IndexedDB（本地缓存）+ GUN.js（P2P 共享同步）
- * - 自己的帖子：写入 IndexedDB + GUN
- * - 他人的帖子：从 GUN 网络实时同步
- * - 其他人打开网站时，会自动从 GUN 网络拉取所有共享帖子
+ * 混合存储：IndexedDB（本地缓存 + 附件）+ Supabase（跨用户同步）
+ * - 自己的帖子：写入 Supabase（获取 ID）→ 存入 IndexedDB（含附件）
+ * - 他人的帖子：从 Supabase 实时同步 → 写入 IndexedDB 缓存
+ * - Supabase 是数据的唯一致信源，IndexedDB 是本地缓存 + 附件存储
  */
 import { create } from 'zustand';
 import {
   getAllPosts,
   getPostById,
-  createPost,
-  updatePost,
-  deletePost,
+  createPost as createPostInDB,
+  updatePost as updatePostInDB,
+  deletePost as deletePostInDB,
   getCommentsByPostId,
-  createComment,
-  deleteComment,
+  createComment as createCommentInDB,
+  deleteComment as deleteCommentInDB,
+  upsertPosts,
+  upsertComments,
   type Post,
   type PostType,
   type Comment,
 } from '../lib/db';
 import {
-  publishPostToGun,
-  removePostFromGun,
-  publishCommentToGun,
-  removeCommentFromGun,
-  subscribeToGunPosts,
-  subscribeToGunComments,
-} from '../lib/gun';
+  fetchAllPosts,
+  insertPost as insertPostToSupabase,
+  updatePostInSupabase,
+  deletePostFromSupabase,
+  insertComment as insertCommentToSupabase,
+  deleteCommentFromSupabase,
+  subscribeToAllPosts,
+  subscribeToComments,
+} from '../lib/supabase';
 import { useUserStore } from './userStore';
 
 interface PostFilters {
@@ -36,38 +40,37 @@ interface PostFilters {
 
 interface PostState {
   posts: Post[];
-  gunPosts: Post[];       // 仅来自 GUN 网络的帖子
   currentPost: Post | null;
   comments: Comment[];
   filters: PostFilters;
   loading: boolean;
   loaded: boolean;
 
-  /** 初始化：加载本地 + 订阅 GUN */
+  /** 初始化：从 Supabase 加载 + 订阅实时变更 */
   initPosts: () => () => void;
 
-  /** 加载所有帖子（本地 + GUN 合并） */
+  /** 加载所有帖子（Supabase + 本地 IndexedDB 合并） */
   loadPosts: () => Promise<void>;
 
-  /** 加载单个帖子 */
+  /** 加载单个帖子详情 */
   loadPost: (id: number) => Promise<void>;
 
-  /** 加载帖子评论（本地 + GUN 合并） */
+  /** 加载帖子评论（Supabase 实时订阅 + 本地缓存） */
   loadComments: (postId: number) => Promise<void>;
 
-  /** 创建新帖子（本地 + GUN） */
+  /** 创建新帖子（Supabase 先 → IndexedDB 后） */
   addPost: (title: string, content: string, type: PostType, attachments?: Post['attachments']) => Promise<number>;
 
-  /** 编辑帖子（仅本地） */
+  /** 编辑帖子（IndexedDB + Supabase） */
   editPost: (id: number, updates: Partial<Post>) => Promise<void>;
 
-  /** 删除帖子（本地 + GUN） */
+  /** 删除帖子（Supabase + IndexedDB 级联删除） */
   removePost: (id: number) => Promise<void>;
 
-  /** 添加评论（本地 + GUN） */
+  /** 添加评论（Supabase 先 → IndexedDB 后） */
   addComment: (postId: number, content: string, parentId?: number | null) => Promise<void>;
 
-  /** 删除评论（本地 + GUN） */
+  /** 删除评论（Supabase + IndexedDB） */
   removeComment: (id: number) => Promise<void>;
 
   /** 设置筛选条件 */
@@ -76,16 +79,16 @@ interface PostState {
   /** 清空筛选 */
   clearFilters: () => void;
 
-  /** 获取筛选后的帖子列表（合并本地和 GUN） */
+  /** 获取筛选后的帖子列表 */
   getFilteredPosts: () => Post[];
 }
 
-// 用于存储 GUN 订阅取消函数的引用
+// 存储订阅取消函数，防止内存泄漏
 let unsubscribePosts: (() => void) | null = null;
+let unsubscribeComments: (() => void) | null = null;
 
 export const usePostStore = create<PostState>((set, get) => ({
   posts: [],
-  gunPosts: [],
   currentPost: null,
   comments: [],
   filters: { school: '', type: '' },
@@ -93,14 +96,34 @@ export const usePostStore = create<PostState>((set, get) => ({
   loaded: false,
 
   initPosts: () => {
-    // 订阅 GUN 网络中的帖子变化
-    unsubscribePosts = subscribeToGunPosts((gunPosts) => {
-      set({ gunPosts });
-      // 自动合并到 posts 列表
-      get().loadPosts();
+    // 订阅 Supabase 帖子变更（包含初始加载）
+    unsubscribePosts = subscribeToAllPosts(async (supabasePosts) => {
+      try {
+        // 获取本地已有帖子（可能有附件数据）
+        const localPosts = await getAllPosts();
+        const localMap = new Map(localPosts.map((p) => [p.id!, p]));
+
+        // 合并：从 Supabase 获取最新元数据，但保留本地附件
+        for (const sp of supabasePosts) {
+          const local = localMap.get(sp.id!);
+          if (local?.attachments?.length) {
+            sp.attachments = local.attachments;
+          }
+        }
+
+        // 写入 IndexedDB 缓存
+        await upsertPosts(supabasePosts);
+
+        // 从 IndexedDB 加载完整列表
+        const merged = await getAllPosts();
+        set({ posts: merged, loaded: true });
+      } catch (error) {
+        console.error('同步帖子失败，降级到本地数据:', error);
+        const localPosts = await getAllPosts();
+        set({ posts: localPosts, loaded: true });
+      }
     });
 
-    // 返回清理函数
     return () => {
       if (unsubscribePosts) {
         unsubscribePosts();
@@ -112,22 +135,31 @@ export const usePostStore = create<PostState>((set, get) => ({
   loadPosts: async () => {
     set({ loading: true });
     try {
-      // 从 IndexedDB 加载本地帖子
-      const localPosts = await getAllPosts();
-      const { gunPosts } = get();
+      // 从 Supabase 拉取最新帖子
+      const supabasePosts = await fetchAllPosts();
 
-      // 合并本地和 GUN 帖子（按 ID 去重，优先本地——因为本地有完整附件数据）
-      const merged = new Map<number, Post>();
-      for (const p of gunPosts) merged.set(p.id!, p);
-      for (const p of localPosts) merged.set(p.id!, p); // 本地覆盖 GUN（附件数据完整）
+      if (supabasePosts.length > 0) {
+        // 获取本地帖子（保留附件数据）
+        const localPosts = await getAllPosts();
+        const localMap = new Map(localPosts.map((p) => [p.id!, p]));
 
-      const allPosts = Array.from(merged.values())
-        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        for (const sp of supabasePosts) {
+          const local = localMap.get(sp.id!);
+          if (local?.attachments?.length) {
+            sp.attachments = local.attachments;
+          }
+        }
 
-      set({ posts: allPosts, loading: false, loaded: true });
+        await upsertPosts(supabasePosts);
+      }
+
+      // 从 IndexedDB 加载完整列表
+      const merged = await getAllPosts();
+      set({ posts: merged, loading: false, loaded: true });
     } catch (error) {
-      console.error('加载帖子失败:', error);
-      set({ loading: false });
+      console.error('加载帖子失败，降级到本地数据:', error);
+      const localPosts = await getAllPosts();
+      set({ posts: localPosts, loading: false, loaded: true });
     }
   },
 
@@ -135,15 +167,11 @@ export const usePostStore = create<PostState>((set, get) => ({
     set({ loading: true });
     try {
       let post = await getPostById(id);
-      // 如果本地没有，尝试从 GUN 帖子中获取
-      if (!post) {
-        post = get().gunPosts.find((p) => p.id === id) || undefined;
-      }
-      set({ currentPost: post, loading: false });
+      set({ currentPost: post || null, loading: false });
+
       if (post) {
-        // 加载本地评论
-        const localComments = await getCommentsByPostId(id);
-        set({ comments: localComments });
+        // 加载评论（含实时订阅）
+        await get().loadComments(id);
       }
     } catch (error) {
       console.error('加载帖子详情失败:', error);
@@ -152,22 +180,26 @@ export const usePostStore = create<PostState>((set, get) => ({
   },
 
   loadComments: async (postId: number) => {
-    try {
-      const localComments = await getCommentsByPostId(postId);
-      set({ comments: localComments });
+    // 清理之前的评论订阅，防止重复订阅
+    if (unsubscribeComments) {
+      unsubscribeComments();
+      unsubscribeComments = null;
+    }
 
-      // 同时订阅 GUN 评论
-      subscribeToGunComments(postId, (gunComments) => {
-        const current = get().comments;
-        // 合并去重
-        const merged = new Map<number, Comment>();
-        for (const c of gunComments) merged.set(c.id!, c);
-        for (const c of current) merged.set(c.id!, c);
-        set({ comments: Array.from(merged.values())
-          .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)) });
+    try {
+      // 订阅 Supabase 评论变更（包含初始加载）
+      unsubscribeComments = subscribeToComments(postId, async (supabaseComments) => {
+        // 同步到 IndexedDB
+        await upsertComments(supabaseComments);
+
+        // 从 IndexedDB 加载完整评论
+        const localComments = await getCommentsByPostId(postId);
+        set({ comments: localComments });
       });
     } catch (error) {
-      console.error('加载评论失败:', error);
+      console.error('加载评论失败，降级到本地数据:', error);
+      const localComments = await getCommentsByPostId(postId);
+      set({ comments: localComments });
     }
   },
 
@@ -176,8 +208,10 @@ export const usePostStore = create<PostState>((set, get) => ({
     if (!user) throw new Error('请先设置用户信息');
 
     const now = Date.now();
-    // 1. 保存到本地 IndexedDB
-    const id = await createPost({
+
+    // 1. 先插入 Supabase，获取全局唯一 ID
+    const postData: Post = {
+      id: 0, // 占位，Supabase 不发送此字段
       title,
       content,
       type,
@@ -187,40 +221,51 @@ export const usePostStore = create<PostState>((set, get) => ({
       attachments,
       createdAt: now,
       updatedAt: now,
-    });
+    };
 
-    // 2. 发布到 GUN 网络（让其他人能看到）
-    const post = await getPostById(id);
-    if (post) {
-      publishPostToGun(post);
-    }
+    const id = await insertPostToSupabase(postData);
 
-    // 重新加载
+    // 2. 用 Supabase 返回的 ID 存入 IndexedDB（含附件 Blob）
+    postData.id = id;
+    await createPostInDB(postData as Post & { id: number });
+
+    // 3. 刷新本地列表（Supabase Realtime 也会触发刷新）
     await get().loadPosts();
     return id;
   },
 
   editPost: async (id, updates) => {
-    await updatePost(id, updates);
+    // 1. 更新 IndexedDB
+    await updatePostInDB(id, updates);
+
+    // 2. 更新当前帖子展示
     const { currentPost } = get();
     if (currentPost?.id === id) {
       const updated = await getPostById(id);
       set({ currentPost: updated || null });
     }
-    // 编辑后也更新到 GUN（如果是自己的帖子）
+
+    // 3. 同步到 Supabase
     const updatedPost = await getPostById(id);
     if (updatedPost) {
-      publishPostToGun(updatedPost);
+      await updatePostInSupabase(id, updatedPost);
     }
+
+    // 4. 刷新列表
     await get().loadPosts();
   },
 
   removePost: async (id) => {
-    // 1. 从本地删除
-    await deletePost(id);
-    // 2. 从 GUN 网络删除
-    removePostFromGun(id);
+    // 1. 从 Supabase 删除（级联删除评论）
+    await deletePostFromSupabase(id);
+
+    // 2. 从 IndexedDB 删除
+    await deletePostInDB(id);
+
+    // 3. 清空当前帖子状态
     set({ currentPost: null, comments: [] });
+
+    // 4. 刷新列表
     await get().loadPosts();
   },
 
@@ -228,27 +273,37 @@ export const usePostStore = create<PostState>((set, get) => ({
     const user = useUserStore.getState().profile;
     if (!user) throw new Error('请先设置用户信息');
 
-    const commentData = {
+    const now = Date.now();
+
+    // 1. 先插入 Supabase，获取全局唯一 ID
+    const commentData: Comment = {
+      id: 0, // 占位
       postId,
-      content,
       parentId: parentId || null,
+      content,
       author: user.nickname,
       authorId: user.id,
-      createdAt: Date.now(),
+      createdAt: now,
     };
 
-    // 1. 保存到本地
-    const id = await createComment(commentData);
+    const id = await insertCommentToSupabase(commentData);
 
-    // 2. 发布到 GUN
-    publishCommentToGun({ id, ...commentData });
+    // 2. 用 Supabase 返回的 ID 存入 IndexedDB
+    commentData.id = id;
+    await createCommentInDB(commentData);
 
+    // 3. 刷新评论列表（Supabase Realtime 也会触发刷新）
     await get().loadComments(postId);
   },
 
   removeComment: async (id) => {
-    await deleteComment(id);
-    removeCommentFromGun(id);
+    // 1. 从 Supabase 删除
+    await deleteCommentFromSupabase(id);
+
+    // 2. 从 IndexedDB 删除
+    await deleteCommentInDB(id);
+
+    // 3. 刷新评论
     const { currentPost } = get();
     if (currentPost) {
       await get().loadComments(currentPost.id!);
