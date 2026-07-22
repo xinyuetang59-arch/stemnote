@@ -1,12 +1,12 @@
 /**
  * 导出工具栏组件
  * 支持导出 MIDI / MusicXML / PNG / PDF
- * VexFlow 5 渲染为 SVG，PNG/PDF 导出需先将 SVG 转为图片
+ * PNG/PDF 使用 VexFlow Canvas 后端直接渲染，解决字体丢失问题
  */
 import { Download, FileMusic, FileText, Image } from 'lucide-react';
 import { useTranscribeStore } from '../../stores/transcribeStore';
 import { useUIStore } from '../../stores/uiStore';
-import { exportMIDI, exportMusicXML, exportPNGFromSVG, exportPDFFromSVG } from '../../lib/audio/exporter';
+import { exportMIDI, exportMusicXML, exportPNG, exportPDF } from '../../lib/audio/exporter';
 
 export default function ExportBar() {
   const { notes } = useTranscribeStore();
@@ -26,27 +26,14 @@ export default function ExportBar() {
           exportMusicXML(notes, 'stemnote-扒谱');
           addToast('MusicXML 文件已下载', 'success');
           break;
-        case 'png': {
-          // VexFlow 5 渲染为 SVG，取第一个 SVG 元素导出
-          const svg = document.querySelector('.vexflow-container svg') as SVGElement | null;
-          if (svg) {
-            await exportPNGFromSVG(svg, 'stemnote-乐谱');
-            addToast('PNG 图片已下载', 'success');
-          } else {
-            addToast('未找到乐谱，请确认已生成', 'warning');
-          }
+        case 'png':
+          await exportPNG(notes, 'stemnote-乐谱');
+          addToast('PNG 图片已下载', 'success');
           break;
-        }
-        case 'pdf': {
-          const svg = document.querySelector('.vexflow-container svg') as SVGElement | null;
-          if (svg) {
-            await exportPDFFromSVG(svg, 'stemnote-乐谱');
-            addToast('PDF 文件已下载', 'success');
-          } else {
-            addToast('未找到乐谱，请确认已生成', 'warning');
-          }
+        case 'pdf':
+          await exportPDF(notes, 'stemnote-乐谱');
+          addToast('PDF 文件已下载', 'success');
           break;
-        }
       }
     } catch (error) {
       addToast(`导出失败: ${error instanceof Error ? error.message : '请重试'}`, 'error');

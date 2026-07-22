@@ -1,12 +1,17 @@
 /**
  * 导出模块 - MIDI / MusicXML / PNG / PDF 导出
+ *
+ * PNG/PDF 使用 VexFlow Canvas 后端直接渲染，避免 SVG→图片转换时字体丢失
  */
 import type { DetectedNote } from './pitch';
 import { midiToNoteName } from './pitch';
 
+// ====== MIDI 导出 ======
+
 /**
  * 导出 MIDI 文件
  * 使用 @tonejs/midi 库生成标准 MIDI 格式
+ * 注意：@tonejs/midi 的 velocity 参数接受 0-1 归一化值（内部会自行 ×127）
  */
 export async function exportMIDI(notes: DetectedNote[], fileName: string = 'stemnote'): Promise<void> {
   try {
@@ -15,20 +20,19 @@ export async function exportMIDI(notes: DetectedNote[], fileName: string = 'stem
     const midi = new Midi();
     const track = midi.addTrack();
 
-    // 设置速度 (120 BPM)
-    midi.header.setTempo(120);
+    // 设置速度 (120 BPM) — 用 tempos 数组更可靠
+    midi.header.tempos = [{ ticks: 0, bpm: 120 }];
 
-    // 添加音符
+    // 添加音符（velocity 传 0-1 归一化值）
     for (const note of notes) {
       track.addNote({
         midi: note.pitch,
         time: note.startTime,
-        duration: note.duration,
-        velocity: Math.round(note.velocity * 127),
+        duration: Math.max(note.duration, 0.05),
+        velocity: Math.max(0, Math.min(1, note.velocity)),
       });
     }
 
-    // toArray() 返回 Uint8Array，创建独立副本后传给 Blob
     const midiData = midi.toArray();
     const blob = new Blob([new Uint8Array(midiData) as BlobPart], { type: 'audio/midi' });
     const midiUrl = URL.createObjectURL(blob);
@@ -39,6 +43,8 @@ export async function exportMIDI(notes: DetectedNote[], fileName: string = 'stem
     throw new Error('MIDI 导出失败');
   }
 }
+
+// ====== MusicXML 导出 ======
 
 /**
  * 导出 MusicXML (简化版)
@@ -55,12 +61,10 @@ export function exportMusicXML(notes: DetectedNote[], fileName: string = 'stemno
   </part-list>
   <part id="P1">`;
 
-  // 按 startTime 排序
   const sorted = [...notes].sort((a, b) => a.startTime - b.startTime);
 
-  // 将音符分组为小节 (4/4 拍, 120 BPM)
-  const beatDuration = 0.5; // 120 BPM 下每拍 = 0.5秒
-  const measureDuration = beatDuration * 4; // 每小节 2 秒
+  const beatDuration = 0.5;
+  const measureDuration = beatDuration * 4;
   const measures: Map<number, DetectedNote[]> = new Map();
 
   for (const note of sorted) {
@@ -85,17 +89,16 @@ export function exportMusicXML(notes: DetectedNote[], fileName: string = 'stemno
 
     for (const note of measureNotes) {
       const offsetInMeasure = note.startTime - mi * measureDuration;
-      const divisionsStart = Math.round(offsetInMeasure / beatDuration * divisions);
       const divisionsDuration = Math.max(1, Math.round(note.duration / beatDuration * divisions));
 
       const step = midiToNoteName(note.pitch).replace(/[0-9]/g, '').replace('#', '');
-      const alter = midiToNoteName(note.pitch).includes('#') ? 1 : 0;
+      const hasSharp = midiToNoteName(note.pitch).includes('#');
       const octave = Math.floor(note.pitch / 12) - 1;
 
       xml += `
       <note>`;
 
-      if (alter > 0) {
+      if (hasSharp) {
         xml += `
         <pitch>
           <step>${step}</step>
@@ -128,7 +131,6 @@ export function exportMusicXML(notes: DetectedNote[], fileName: string = 'stemno
   downloadFile(URL.createObjectURL(blob), `${fileName}.musicxml`);
 }
 
-/** 根据 duration 推断音符类型 */
 function getNoteType(duration: number, divisions: number): string {
   const ratio = duration / divisions;
   if (ratio >= 4) return 'whole';
@@ -138,53 +140,102 @@ function getNoteType(duration: number, divisions: number): string {
   return '16th';
 }
 
-// ====== SVG → PNG 转换（VexFlow 5 渲染为 SVG，导出需要先转为 PNG） ======
+// ====== PNG / PDF 导出（VexFlow Canvas 后端） ======
 
 /**
- * 将 SVG 元素转换为 PNG data URL
+ * 根据时长推断 VexFlow 时值字符串
  */
-function svgToPngDataUrl(svgElement: SVGElement, scale: number = 2): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // 克隆 SVG 并设置显式宽高（确保渲染正确）
-    const clone = svgElement.cloneNode(true) as SVGElement;
-    const bbox = svgElement.getBoundingClientRect();
-    const width = bbox.width || 800;
-    const height = bbox.height || 400;
-    clone.setAttribute('width', String(width));
-    clone.setAttribute('height', String(height));
-
-    const svgData = new XMLSerializer().serializeToString(clone);
-    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(svgBlob);
-
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = width * scale;
-      canvas.height = height * scale;
-      const ctx = canvas.getContext('2d')!;
-      // 白色背景
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.scale(scale, scale);
-      ctx.drawImage(img, 0, 0, width, height);
-      URL.revokeObjectURL(url);
-      resolve(canvas.toDataURL('image/png'));
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('SVG 转 PNG 失败'));
-    };
-    img.src = url;
-  });
+function getDurationString(durationSeconds: number): string {
+  const beatDuration = 60 / 120; // 120 BPM
+  const ratio = durationSeconds / beatDuration;
+  if (ratio >= 3.5) return '1';
+  if (ratio >= 1.75) return '2';
+  if (ratio >= 0.875) return '4';
+  if (ratio >= 0.4375) return '8';
+  if (ratio >= 0.21875) return '16';
+  return '16';
 }
 
 /**
- * 从 SVG 元素导出 PNG 图片
+ * 使用 VexFlow Canvas 后端将音符渲染到 Canvas
+ * Canvas 后端直接访问浏览器已加载的 Bravura 字体，无需 SVG→图片转换
  */
-export async function exportPNGFromSVG(svgElement: SVGElement, fileName: string = 'stemnote'): Promise<void> {
+async function renderScoreToCanvas(notes: DetectedNote[]): Promise<HTMLCanvasElement> {
+  const { Renderer, Stave, StaveNote, Accidental, Formatter } = await import('vexflow');
+
+  // 创建临时 DOM 容器（必须在 DOM 中 Canvas 才能渲染）
+  const container = document.createElement('div');
+  container.style.cssText = 'position:fixed;left:-9999px;top:0;';
+  document.body.appendChild(container);
+
   try {
-    const dataUrl = await svgToPngDataUrl(svgElement, 2);
+    const sortedNotes = [...notes].sort((a, b) => a.startTime - b.startTime);
+    const notesPerLine = 32;
+    const lineHeight = 200;
+    const lineWidth = 800;
+    const totalLines = Math.ceil(sortedNotes.length / notesPerLine);
+    const totalHeight = Math.max(totalLines * lineHeight + 80, 300);
+
+    const renderer = new Renderer(container, Renderer.Backends.CANVAS);
+    renderer.resize(lineWidth + 40, totalHeight);
+    const ctx = renderer.getContext();
+    ctx.setFont('Arial', 10);
+
+    for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
+      const lineNotes = sortedNotes.slice(
+        lineIndex * notesPerLine,
+        (lineIndex + 1) * notesPerLine
+      );
+      if (lineNotes.length === 0) continue;
+
+      const y = 40 + lineIndex * lineHeight;
+      const stave = new Stave(10, y, lineWidth);
+      if (lineIndex === 0) {
+        stave.addClef('treble').addTimeSignature('4/4');
+      }
+      stave.setContext(ctx).draw();
+
+      const vexNotes: InstanceType<typeof StaveNote>[] = [];
+      for (const note of lineNotes) {
+        const noteName = midiToNoteName(note.pitch);
+        const noteLetter = noteName.replace(/[0-9]/g, '');
+        const octave = noteName.replace(/[^0-9]/g, '');
+
+        const staveNote = new StaveNote({
+          clef: 'treble',
+          keys: [`${noteLetter.toLowerCase()}/${octave}`],
+          duration: getDurationString(note.duration),
+        });
+
+        if (noteLetter.includes('#')) {
+          staveNote.addModifier(new Accidental('#'), 0);
+        }
+        vexNotes.push(staveNote);
+      }
+
+      if (vexNotes.length > 0) {
+        Formatter.FormatAndDraw(ctx, stave, vexNotes, {
+          autoBeam: true,
+          alignRests: true,
+        });
+      }
+    }
+
+    const canvas = container.querySelector('canvas');
+    if (!canvas) throw new Error('乐谱渲染失败，请重试');
+    return canvas;
+  } finally {
+    document.body.removeChild(container);
+  }
+}
+
+/**
+ * 导出 PNG 图片（VexFlow Canvas 直接渲染）
+ */
+export async function exportPNG(notes: DetectedNote[], fileName: string = 'stemnote'): Promise<void> {
+  try {
+    const canvas = await renderScoreToCanvas(notes);
+    const dataUrl = canvas.toDataURL('image/png');
     downloadFile(dataUrl, `${fileName}.png`);
   } catch (error) {
     console.error('PNG 导出失败:', error);
@@ -193,15 +244,15 @@ export async function exportPNGFromSVG(svgElement: SVGElement, fileName: string 
 }
 
 /**
- * 导出 PDF 乐谱（从 SVG 元素）
+ * 导出 PDF 乐谱（VexFlow Canvas → jsPDF）
  */
-export async function exportPDFFromSVG(svgElement: SVGElement, fileName: string = 'stemnote'): Promise<void> {
+export async function exportPDF(notes: DetectedNote[], fileName: string = 'stemnote'): Promise<void> {
   try {
     const { default: jsPDF } = await import('jspdf');
 
-    const dataUrl = await svgToPngDataUrl(svgElement, 3);
+    const canvas = await renderScoreToCanvas(notes);
+    const dataUrl = canvas.toDataURL('image/png');
 
-    // 创建临时图片获取尺寸
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const el = new Image();
       el.onload = () => resolve(el);
@@ -221,13 +272,11 @@ export async function exportPDFFromSVG(svgElement: SVGElement, fileName: string 
     let heightLeft = imgHeight;
     let position = margin;
 
-    // 第一页
     pdf.addImage(dataUrl, 'PNG', margin, position, usableWidth, imgHeight);
     heightLeft -= usableHeight;
 
-    // 分页
     while (heightLeft > 0) {
-      position = -(imgHeight - (imgHeight - heightLeft) - margin);
+      position = -(imgHeight - heightLeft) - margin;
       pdf.addPage();
       pdf.addImage(dataUrl, 'PNG', margin, position, usableWidth, imgHeight);
       heightLeft -= usableHeight;
@@ -239,9 +288,6 @@ export async function exportPDFFromSVG(svgElement: SVGElement, fileName: string 
     throw new Error('PDF 导出失败');
   }
 }
-
-// 保留旧函数签名兼容性（废弃）
-export { svgToPngDataUrl };
 
 /** 通用下载辅助函数 */
 function downloadFile(url: string, fileName: string): void {
