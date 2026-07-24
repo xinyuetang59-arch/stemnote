@@ -29,13 +29,8 @@ export default function Navbar() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
 
   const isActive = (path: string) => {
-    if (path === '/') return location.pathname === '/';
-    return location.pathname.startsWith(path);
+    return location.pathname === path;
   };
-
-  const navLinks = [
-    { path: '/transcribe', label: '扒谱', icon: Music },
-  ];
 
   return (
     <nav className="sticky top-0 z-30 bg-white/80 dark:bg-brand-navy/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-700">
@@ -49,9 +44,9 @@ export default function Navbar() {
           {/* 桌面导航链接 */}
           <div className="hidden md:flex items-center gap-1">
             <Link
-              to="/transcribe"
+              to="/"
               className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                isActive('/transcribe')
+                isActive('/')
                   ? 'bg-brand-gold/10 text-brand-gold'
                   : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
               }`}
@@ -60,9 +55,9 @@ export default function Navbar() {
               扒谱
             </Link>
             <Link
-              to="/"
+              to="/community"
               className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                isActive('/') && location.pathname === '/'
+                isActive('/community')
                   ? 'bg-brand-gold/10 text-brand-gold'
                   : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
               }`}
@@ -160,14 +155,14 @@ export default function Navbar() {
         {mobileMenuOpen && (
           <div className="md:hidden border-t border-slate-200 dark:border-slate-700 py-3 animate-fade-in">
             <Link
-              to="/transcribe"
+              to="/"
               onClick={() => setMobileMenuOpen(false)}
               className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
             >
               <Music className="w-4 h-4" /> 扒谱工作台
             </Link>
             <Link
-              to="/"
+              to="/community"
               onClick={() => setMobileMenuOpen(false)}
               className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
             >

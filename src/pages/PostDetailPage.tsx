@@ -58,7 +58,7 @@ export default function PostDetailPage() {
       <div className="max-w-2xl mx-auto px-4 py-16 text-center">
         <h2 className="text-xl font-semibold text-slate-800 dark:text-white mb-2">帖子不存在</h2>
         <p className="text-slate-500 mb-4">该帖子可能已被删除</p>
-        <Link to="/" className="text-brand-gold hover:underline">
+        <Link to="/community" className="text-brand-gold hover:underline">
           返回社区首页
         </Link>
       </div>
@@ -71,7 +71,7 @@ export default function PostDetailPage() {
     <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8">
       {/* 返回按钮 */}
       <Link
-        to="/"
+        to="/community"
         className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 mb-6 transition-colors"
       >
         <ArrowLeft className="w-4 h-4" />

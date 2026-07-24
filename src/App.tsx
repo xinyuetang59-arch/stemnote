@@ -62,8 +62,8 @@ export default function App() {
         <Suspense fallback={<PageLoading />}>
           <Routes>
             <Route path="/" element={<Layout />}>
-              <Route index element={<HomePage />} />
-              <Route path="transcribe" element={<TranscribePage />} />
+              <Route index element={<TranscribePage />} />
+              <Route path="community" element={<HomePage />} />
               <Route path="post/:id" element={<PostDetailPage />} />
               <Route path="new-post" element={<NewPostPage />} />
               <Route path="my-posts" element={<MyPostsPage />} />

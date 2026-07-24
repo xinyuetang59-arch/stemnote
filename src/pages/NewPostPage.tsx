@@ -10,7 +10,7 @@ export default function NewPostPage() {
     <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8">
       {/* 返回按钮 */}
       <Link
-        to="/"
+        to="/community"
         className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 mb-6 transition-colors"
       >
         <ArrowLeft className="w-4 h-4" />
