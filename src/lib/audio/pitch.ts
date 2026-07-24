@@ -36,7 +36,10 @@ function frequencyToMidi(frequency: number): number {
  * threshold 降至 0.08 提高灵敏度，减少漏检
  */
 export function detectPitches(data: Float32Array, sampleRate: number): Float32Array {
-  const quantization = Math.max(4, Math.round(sampleRate / 345));
+  // chunkSize = sampleRate * 60 / (quantization * tempo)
+  // quantization=16, tempo=120 → chunkSize = sampleRate / 32
+  // 22050Hz → 689 采样点 = 31.3ms → C4 约 8.4 个周期，YIN 可靠
+  const quantization = 16;
 
   const detector = Pitchfinder.YIN({ sampleRate, threshold: 0.08 });
   let raw: unknown;
@@ -72,7 +75,7 @@ export function extractNotes(
   sampleRate: number,
   pitches: Float32Array
 ): DetectedNote[] {
-  const quantization = Math.max(4, Math.round(sampleRate / 345));
+  const quantization = 16;
   const chunkSize = Math.round((sampleRate * 60) / (quantization * 120));
 
   const notes: DetectedNote[] = [];

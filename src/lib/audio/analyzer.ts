@@ -49,8 +49,8 @@ export async function analyzeAudio(file: File, callbacks: AnalysisCallbacks): Pr
     onStageChange('separating', '正在预处理音频...');
     onProgress(25);
 
-    // 降采样到 11025Hz（对音高检测足够，减少 4 倍计算量）
-    const targetSampleRate = Math.min(11025, originalSampleRate);
+    // 降采样到 22050Hz（平衡精度与速度：chunk 内 C4 至少 8 个周期）
+    const targetSampleRate = Math.min(22050, originalSampleRate);
     const needsDownsample = originalSampleRate > targetSampleRate;
 
     let channelData: Float32Array;
