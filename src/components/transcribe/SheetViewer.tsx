@@ -1,9 +1,9 @@
 /**
  * 五线谱渲染组件
  * 使用 VexFlow 5 渲染检测到的音符
- * 支持点击选中音符、手动拖动调整音高和时值
+ * 支持点击选中音符以查看/编辑详情
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Renderer, Stave, StaveNote, Accidental, Formatter } from 'vexflow';
 import { useTranscribeStore } from '../../stores/transcribeStore';
 import { midiToNoteName } from '../../lib/audio/pitch';
@@ -11,24 +11,32 @@ import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 
 export default function SheetViewer() {
   const containerRef = useRef<HTMLDivElement>(null);
+  const clickHandlersRef = useRef<Array<{ el: SVGElement; fn: () => void }>>([]);
   const { notes, selectedNoteIndex, selectNote } = useTranscribeStore();
   const [zoom, setZoom] = useState(1.0);
+
+  // 清理旧的事件监听器
+  const cleanupHandlers = useCallback(() => {
+    clickHandlersRef.current.forEach(({ el, fn }) => {
+      el.removeEventListener('click', fn);
+    });
+    clickHandlersRef.current = [];
+  }, []);
 
   // 渲染五线谱
   useEffect(() => {
     if (!containerRef.current || notes.length === 0) return;
 
-    // 清空之前的渲染
+    // 清空之前的渲染和事件
+    cleanupHandlers();
     containerRef.current.innerHTML = '';
 
     try {
-      // 创建渲染器
       const renderer = new Renderer(
         containerRef.current,
         Renderer.Backends.SVG
       );
 
-      // 计算画布大小
       const notesPerLine = 32;
       const lineHeight = 200 * zoom;
       const lineWidth = Math.min(containerRef.current.clientWidth - 40, 1200);
@@ -41,83 +49,80 @@ export default function SheetViewer() {
       context.setFont('Arial', 10);
       context.setFillStyle('#1e293b');
 
-      // 按时间排序
       const sortedNotes = [...notes].sort((a, b) => a.startTime - b.startTime);
 
-      // 分组渲染
       for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
         const lineNotes = sortedNotes.slice(
           lineIndex * notesPerLine,
           (lineIndex + 1) * notesPerLine
         );
-
         if (lineNotes.length === 0) continue;
 
         const y = 40 + lineIndex * lineHeight;
 
-        // 创建谱表
         const stave = new Stave(10, y, lineWidth);
         if (lineIndex === 0) {
           stave.addClef('treble').addTimeSignature('4/4');
         }
         stave.setContext(context).draw();
 
-        // 创建音符数组
-        if (lineNotes.length > 0) {
-          // 对每个音符创建 VexFlow note
-          const vexNotes: InstanceType<typeof StaveNote>[] = [];
+        const vexNotes: InstanceType<typeof StaveNote>[] = [];
+        for (const note of lineNotes) {
+          const noteName = midiToNoteName(note.pitch);
+          const noteLetter = noteName.replace(/[0-9]/g, '');
+          const octave = noteName.replace(/[^0-9]/g, '');
 
-          for (let ni = 0; ni < lineNotes.length; ni++) {
-            const note = lineNotes[ni];
-            const noteName = midiToNoteName(note.pitch);
-            const noteLetter = noteName.replace(/[0-9]/g, '');
-            const octave = noteName.replace(/[^0-9]/g, '');
+          const duration = getClosestDuration(note.duration, 120);
+          const staveNote = new StaveNote({
+            clef: 'treble',
+            keys: [`${noteLetter.toLowerCase()}/${octave}`],
+            duration,
+          });
 
-            const duration = getClosestDuration(note.duration, 120);
-            const staveNote = new StaveNote({
-              clef: 'treble',
-              keys: [`${noteLetter.toLowerCase()}/${octave}`],
-              duration: duration,
-            });
-
-            // 添加临时升降号
-            if (noteLetter.includes('#')) {
-              staveNote.addModifier(new Accidental('#'), 0);
-            }
-
-            // 选中高亮
-            const globalIndex = lineIndex * notesPerLine + ni;
-            if (globalIndex === selectedNoteIndex) {
-              staveNote.setStyle({ fillStyle: '#f59e0b', strokeStyle: '#d97706' });
-            }
-
-            vexNotes.push(staveNote);
+          if (noteLetter.includes('#')) {
+            staveNote.addModifier(new Accidental('#'), 0);
           }
 
-          if (vexNotes.length > 0) {
-            // 使用 Formatter 排版
-            Formatter.FormatAndDraw(context, stave, vexNotes, {
-              autoBeam: true,
-              alignRests: true,
-            });
-
-            // 为每个音符绑定点击事件
-            // VexFlow 5 的 SVG 元素可以通过查询获取
-            setTimeout(() => {
-              const svgElements = containerRef.current?.querySelectorAll('.vf-note');
-              svgElements?.forEach((el, i) => {
-                const globalIndex = lineIndex * notesPerLine + i;
-                if (globalIndex < notes.length) {
-                  (el as SVGElement).style.cursor = 'pointer';
-                  (el as SVGElement).addEventListener('click', () => {
-                    selectNote(sortedNotes[globalIndex], globalIndex);
-                  });
-                }
-              });
-            }, 50);
+          // 选中高亮
+          const globalIndex = lineIndex * notesPerLine + vexNotes.length;
+          if (globalIndex === selectedNoteIndex) {
+            staveNote.setStyle({ fillStyle: '#f59e0b', strokeStyle: '#d97706' });
           }
+
+          vexNotes.push(staveNote);
+        }
+
+        if (vexNotes.length > 0) {
+          Formatter.FormatAndDraw(context, stave, vexNotes, {
+            autoBeam: true,
+            alignRests: true,
+          });
         }
       }
+
+      // VexFlow 5 SVG 渲染是同步的，DOM 已经就绪
+      // 使用 requestAnimationFrame 确保浏览器完成布局后再绑事件
+      requestAnimationFrame(() => {
+        cleanupHandlers();
+
+        // VexFlow 5 中每个音符的 SVG 元素 class 为 vf-stavenote
+        const noteElements = containerRef.current?.querySelectorAll('.vf-stavenote');
+        if (!noteElements || noteElements.length === 0) return;
+
+        noteElements.forEach((el, i) => {
+          if (i < sortedNotes.length) {
+            const svgEl = el as SVGElement;
+            svgEl.style.cursor = 'pointer';
+
+            const handler = () => {
+              selectNote(sortedNotes[i], i);
+            };
+
+            svgEl.addEventListener('click', handler);
+            clickHandlersRef.current.push({ el: svgEl, fn: handler });
+          }
+        });
+      });
     } catch (error) {
       console.error('VexFlow 渲染出错:', error);
       if (containerRef.current) {
@@ -127,7 +132,7 @@ export default function SheetViewer() {
           </div>`;
       }
     }
-  }, [notes, selectedNoteIndex, zoom, selectNote]);
+  }, [notes, selectedNoteIndex, zoom, selectNote, cleanupHandlers]);
 
   // 空状态
   if (notes.length === 0) {
@@ -196,11 +201,10 @@ function getClosestDuration(durationSeconds: number, bpm: number): string {
   const beatDuration = 60 / bpm;
   const ratio = durationSeconds / beatDuration;
 
-  // 标准时值映射
-  if (ratio >= 3.5) return '1';   // 全音符
-  if (ratio >= 1.75) return '2';  // 二分音符
-  if (ratio >= 0.875) return '4'; // 四分音符
-  if (ratio >= 0.4375) return '8'; // 八分音符
-  if (ratio >= 0.21875) return '16'; // 十六分音符
+  if (ratio >= 3.5) return '1';
+  if (ratio >= 1.75) return '2';
+  if (ratio >= 0.875) return '4';
+  if (ratio >= 0.4375) return '8';
+  if (ratio >= 0.21875) return '16';
   return '16';
 }
