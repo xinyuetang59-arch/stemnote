@@ -3,7 +3,7 @@
  * 流程：解码 → OfflineAudioContext降采样 → 音高检测 → 音符提取
  * 降采样后将数据量减少 4 倍，检测速度大幅提升
  */
-import { detectPitches, extractNotes, type DetectedNote } from './pitch';
+import { detectPitches, extractNotes, postProcessNotes, type DetectedNote } from './pitch';
 
 /** 分析阶段 */
 export type AnalysisStage = 'idle' | 'decoding' | 'separating' | 'detecting' | 'generating' | 'done' | 'error';
@@ -111,7 +111,14 @@ export async function analyzeAudio(file: File, callbacks: AnalysisCallbacks): Pr
 
     console.log(`[analyze] 音符提取完成: ${notes.length} 个音符`);
 
-    if (notes.length === 0) {
+    // ====== 阶段5：后处理 ======
+    onStageChange('generating', '正在优化乐谱...');
+    onProgress(85);
+
+    const processed = postProcessNotes(notes);
+    console.log(`[analyze] 后处理完成: ${notes.length} → ${processed.length} 个音符`);
+
+    if (processed.length === 0) {
       onError('未能从音频中提取到音符\n\n扒谱结果仅供参考，建议尝试：\n• 使用纯器乐音频\n• 确保音频中有清晰的旋律线\n• 尝试不同的音乐片段');
       return;
     }
@@ -121,7 +128,7 @@ export async function analyzeAudio(file: File, callbacks: AnalysisCallbacks): Pr
     onProgress(100);
 
     await sleep(200);
-    onComplete(notes);
+    onComplete(processed);
   } catch (error) {
     const message = error instanceof Error ? error.message : '音频分析失败，请重试';
     console.error('[analyze] 错误:', message);
