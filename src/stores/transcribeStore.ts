@@ -1,15 +1,21 @@
 /**
  * 扒谱状态管理 (Zustand)
- * 管理音频分析流水线 + 多乐器音轨
+ * 管理音频分析流水线 + 多乐器音轨 + 扒谱历史持久化
  *
- * 每个乐器维护独立的音符列表：
- * - 分析完成后，检测到的音符分配到当前选中的乐器
- * - 切换乐器时显示对应乐器的音符
- * - 可在各乐器音轨间独立编辑
+ * 持久化：
+ * - 分析完成后自动保存到 IndexedDB
+ * - 刷新页面或重新打开后可从历史中恢复
  */
 import { create } from 'zustand';
 import { analyzeAudio, quantizeNotes, type AnalysisStage } from '../lib/audio/analyzer';
 import type { DetectedNote } from '../lib/audio/pitch';
+import {
+  getAllTranscriptions,
+  saveTranscription as saveToDB,
+  updateTranscription,
+  deleteTranscription as deleteFromDB,
+  type TranscriptionRecord,
+} from '../lib/db';
 
 /** 支持的乐器 ID 列表 */
 const INSTRUMENT_IDS = ['piano', 'guitar', 'bass', 'vocal', 'drums', 'other'];
@@ -27,15 +33,18 @@ interface TranscribeState {
   stage: AnalysisStage;
   progress: number;
   stageMessage: string;
-  /** 每个乐器独立的音符列表 */
   tracks: Record<string, DetectedNote[]>;
-  /** 当前选中乐器音轨的音符（自动同步自 tracks[instrument]） */
   notes: DetectedNote[];
   selectedNote: DetectedNote | null;
   selectedNoteIndex: number;
   instrument: string;
   error: string | null;
   audioFileName: string | null;
+  /** 扒谱历史记录列表 */
+  history: TranscriptionRecord[];
+  /** 当前加载的历史记录 ID（null = 新分析） */
+  currentHistoryId: number | null;
+
   /** 开始分析音频文件 */
   startAnalysis: (file: File) => Promise<void>;
   /** 选中一个音符 */
@@ -50,6 +59,12 @@ interface TranscribeState {
   quantize: (bpm?: number) => void;
   /** 重置状态 */
   reset: () => void;
+  /** 加载扒谱历史列表 */
+  loadHistory: () => Promise<void>;
+  /** 从历史记录加载扒谱结果 */
+  loadFromHistory: (record: TranscriptionRecord) => void;
+  /** 删除历史记录 */
+  removeHistory: (id: number) => Promise<void>;
 }
 
 export const useTranscribeStore = create<TranscribeState>((set, get) => ({
@@ -63,6 +78,8 @@ export const useTranscribeStore = create<TranscribeState>((set, get) => ({
   instrument: 'piano',
   error: null,
   audioFileName: null,
+  history: [],
+  currentHistoryId: null,
 
   startAnalysis: async (file: File) => {
     const currentInstrument = get().instrument;
@@ -77,6 +94,7 @@ export const useTranscribeStore = create<TranscribeState>((set, get) => ({
       selectedNoteIndex: -1,
       error: null,
       audioFileName: file.name,
+      currentHistoryId: null,
     });
 
     await analyzeAudio(file, {
@@ -86,10 +104,23 @@ export const useTranscribeStore = create<TranscribeState>((set, get) => ({
       onProgress: (percent) => {
         set({ progress: percent });
       },
-      onComplete: (detectedNotes) => {
-        // 将检测到的音符放入当前选中乐器的音轨
+      onComplete: async (detectedNotes) => {
         const tracks = emptyTracks();
         tracks[currentInstrument] = detectedNotes;
+
+        // 保存到 IndexedDB
+        let historyId: number | null = null;
+        try {
+          historyId = await saveToDB({
+            fileName: file.name,
+            tracksJson: JSON.stringify(tracks),
+            instrument: currentInstrument,
+            noteCount: detectedNotes.length,
+            createdAt: Date.now(),
+          });
+        } catch (e) {
+          console.error('保存扒谱记录失败:', e);
+        }
 
         set({
           tracks,
@@ -97,7 +128,11 @@ export const useTranscribeStore = create<TranscribeState>((set, get) => ({
           stage: 'done',
           stageMessage: '分析完成！',
           progress: 100,
+          currentHistoryId: historyId,
         });
+
+        // 刷新历史列表
+        get().loadHistory();
       },
       onError: (error) => {
         set({ error, stage: 'error', stageMessage: error });
@@ -110,14 +145,20 @@ export const useTranscribeStore = create<TranscribeState>((set, get) => ({
   },
 
   updateNote: (index, updates) => {
-    const { tracks, instrument } = get();
+    const { tracks, instrument, currentHistoryId } = get();
     const instrumentNotes = [...tracks[instrument]];
     if (index >= 0 && index < instrumentNotes.length) {
       instrumentNotes[index] = { ...instrumentNotes[index], ...updates };
-      set({
-        tracks: { ...tracks, [instrument]: instrumentNotes },
-        notes: instrumentNotes,
-      });
+      const newTracks = { ...tracks, [instrument]: instrumentNotes };
+      set({ tracks: newTracks, notes: instrumentNotes });
+
+      // 更新 IndexedDB 中的记录
+      if (currentHistoryId != null) {
+        updateTranscription(currentHistoryId, {
+          tracksJson: JSON.stringify(newTracks),
+          noteCount: instrumentNotes.length,
+        }).catch(() => {});
+      }
     }
   },
 
@@ -128,7 +169,6 @@ export const useTranscribeStore = create<TranscribeState>((set, get) => ({
       tracks: { ...tracks, [targetInstrument]: sourceNotes },
     });
 
-    // 如果当前就在目标乐器上，刷新 notes
     if (get().instrument === targetInstrument) {
       set({ notes: sourceNotes });
     }
@@ -163,6 +203,52 @@ export const useTranscribeStore = create<TranscribeState>((set, get) => ({
       selectedNoteIndex: -1,
       error: null,
       audioFileName: null,
+      currentHistoryId: null,
     });
+  },
+
+  loadHistory: async () => {
+    try {
+      const records = await getAllTranscriptions();
+      set({ history: records });
+    } catch (e) {
+      console.error('加载扒谱历史失败:', e);
+    }
+  },
+
+  loadFromHistory: (record: TranscriptionRecord) => {
+    try {
+      const tracks = JSON.parse(record.tracksJson) as Record<string, DetectedNote[]>;
+      const notes = tracks[record.instrument] || [];
+
+      set({
+        tracks,
+        notes,
+        instrument: record.instrument,
+        audioFileName: record.fileName,
+        stage: 'done',
+        progress: 100,
+        stageMessage: '已加载历史记录',
+        currentHistoryId: record.id!,
+        selectedNote: null,
+        selectedNoteIndex: -1,
+        error: null,
+      });
+    } catch (e) {
+      console.error('加载历史记录失败:', e);
+    }
+  },
+
+  removeHistory: async (id: number) => {
+    try {
+      await deleteFromDB(id);
+      const { currentHistoryId } = get();
+      if (currentHistoryId === id) {
+        get().reset();
+      }
+      await get().loadHistory();
+    } catch (e) {
+      console.error('删除历史记录失败:', e);
+    }
   },
 }));

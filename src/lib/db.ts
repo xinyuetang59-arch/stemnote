@@ -5,7 +5,7 @@
 import { openDB, type IDBPDatabase } from 'idb';
 
 const DB_NAME = 'stemnote-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 // ===== 类型定义 =====
 
@@ -53,6 +53,16 @@ export interface Comment {
   createdAt: number;
 }
 
+/** 扒谱记录（持久化到 IndexedDB） */
+export interface TranscriptionRecord {
+  id?: number;
+  fileName: string;
+  tracksJson: string;     // JSON.stringify(Record<string, DetectedNote[]>)
+  instrument: string;
+  noteCount: number;
+  createdAt: number;
+}
+
 // ===== 数据库单例 =====
 let dbInstance: IDBPDatabase | null = null;
 
@@ -83,6 +93,15 @@ export async function getDB(): Promise<IDBPDatabase> {
         commentStore.createIndex('postId', 'postId');
         commentStore.createIndex('parentId', 'parentId');
         commentStore.createIndex('createdAt', 'createdAt');
+      }
+
+      // 扒谱记录存储
+      if (!db.objectStoreNames.contains('transcriptions')) {
+        const transStore = db.createObjectStore('transcriptions', {
+          keyPath: 'id',
+          autoIncrement: true,
+        });
+        transStore.createIndex('createdAt', 'createdAt');
       }
     },
   });
@@ -223,6 +242,36 @@ export async function deleteComment(id: number): Promise<void> {
     await tx.store.delete(key);
   }
   await db.delete('comments', id);
+}
+
+// ===== 扒谱记录操作 =====
+
+/** 获取所有扒谱记录，按时间倒序 */
+export async function getAllTranscriptions(): Promise<TranscriptionRecord[]> {
+  const db = await getDB();
+  const records = await db.getAll('transcriptions');
+  return records.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/** 保存扒谱记录 */
+export async function saveTranscription(record: Omit<TranscriptionRecord, 'id'>): Promise<number> {
+  const db = await getDB();
+  const id = await db.add('transcriptions', record);
+  return id as number;
+}
+
+/** 更新扒谱记录 */
+export async function updateTranscription(id: number, updates: Partial<TranscriptionRecord>): Promise<void> {
+  const db = await getDB();
+  const record = await db.get('transcriptions', id);
+  if (!record) return;
+  await db.put('transcriptions', { ...record, ...updates });
+}
+
+/** 删除扒谱记录 */
+export async function deleteTranscription(id: number): Promise<void> {
+  const db = await getDB();
+  await db.delete('transcriptions', id);
 }
 
 // ===== 数据导出/导入 =====
